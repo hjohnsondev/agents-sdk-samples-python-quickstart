@@ -5,6 +5,8 @@ import sys
 import traceback
 from pathlib import Path
 from dotenv import load_dotenv
+import asyncio
+from microsoft_agents.activity import Activity
 
 load_dotenv()
 
@@ -47,16 +49,40 @@ async def on_members_added(context: TurnContext, _state: TurnState):
 # Message handler for incoming messages
 @AGENT_APP.activity("message")
 async def on_message(context: TurnContext, state: TurnState):
-    history: list = state.get_value("ConversationState.messages") or []
+    # Ignore non-text activities (attachments, adaptive card submits, etc.)
+    if not context.activity.text:
+        return
 
-    history.append({"role": "user", "content": context.activity.text})
+    # Send typing indicator immediately (awaited so it arrives before the LLM call starts).
+    await context.send_activity(Activity(type="typing"))
 
-    reply = await run_agent(history, _DAP_SYSTEM_PROMPT, sub_agents)
+    # Background loop refreshes the "..." animation every ~4s (it times out after ~5s).
+    async def _typing_loop():
+        try:
+            while True:
+                await asyncio.sleep(4)
+                await context.send_activity(Activity(type="typing"))
+        except asyncio.CancelledError:
+            pass  # Expected on cancel.
 
-    history.append({"role": "assistant", "content": reply})
-    state.set_value("ConversationState.messages", history)
+    typing_task = asyncio.create_task(_typing_loop())
+    try:
+        # Amend conversation history with the latest user message, then call the agent to get a response.
+        history: list = state.get_value("ConversationState.messages") or []
+        history.append({"role": "user", "content": context.activity.text})
 
-    await context.send_activity(reply)
+        reply = await run_agent(history, _DAP_SYSTEM_PROMPT, sub_agents, context)
+
+        history.append({"role": "assistant", "content": reply})
+        state.set_value("ConversationState.messages", history)
+
+        await context.send_activity(reply)
+    finally:
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
 
 # Global error handler for unhandled exceptions during turn processing
 @AGENT_APP.error

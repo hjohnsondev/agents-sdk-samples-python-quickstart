@@ -1,5 +1,8 @@
 import asyncio
 import anthropic
+from microsoft_agents.hosting.core import ( 
+    TurnContext,
+) 
 from .dap_types import Message, ToolDefinition
 
 _client = anthropic.AsyncAnthropic()
@@ -9,12 +12,14 @@ MAX_ITERATIONS = 10
 async def run_agent(
     conversation_history: list[Message],
     system_prompt: str,
-    tools: list[ToolDefinition],
+    tools: list[ToolDefinition], 
+    context: TurnContext = None,
 ) -> str:
     messages = list(conversation_history)
     tool_schemas = [t["schema"] for t in tools]
     tool_handlers = {t["schema"]["name"]: t["handler"] for t in tools}
 
+    tool_notified = False
     for iteration in range(1, MAX_ITERATIONS + 1):
         print(f"[dap_agent] Iteration {iteration}")
 
@@ -33,6 +38,10 @@ async def run_agent(
             return "(No text response)"
 
         if response.stop_reason == "tool_use":
+            if context and not tool_notified:
+                await context.send_activity("I need to use a tool to answer your question...")
+                tool_notified = True
+
             tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
             tool_names = [b.name for b in tool_use_blocks]
             print(f"[dap_agent] Tool calls: {', '.join(tool_names)}")
